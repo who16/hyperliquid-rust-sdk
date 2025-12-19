@@ -492,7 +492,6 @@ impl WsManager {
 
 impl Drop for WsManager {
     fn drop(&mut self) {
-        warn!("WsManager droped");
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
