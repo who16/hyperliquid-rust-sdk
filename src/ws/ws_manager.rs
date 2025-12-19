@@ -125,7 +125,7 @@ impl WsManager {
             let stop_flag = Arc::clone(&stop_flag);
             let reader_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
-                    info!("WsManager attempting to reconnect");
+                    info!("WsManager connecting...");
                     match Self::connect(&url).await {
                         Ok(ws) => {
                             let (new_writer, mut reader) = ws.split();
