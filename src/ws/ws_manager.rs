@@ -1,5 +1,4 @@
 use std::{
-    borrow::BorrowMut,
     collections::HashMap,
     ops::DerefMut,
     sync::{
@@ -44,7 +43,9 @@ struct SubscriptionData {
 #[derive(Debug)]
 pub(crate) struct WsManager {
     stop_flag: Arc<AtomicBool>,
-    writer: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, protocol::Message>>>,
+    writer: Arc<
+        Mutex<Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, protocol::Message>>>,
+    >,
     subscriptions: Arc<Mutex<HashMap<String, Vec<SubscriptionData>>>>,
     subscription_id: u32,
     subscription_identifiers: HashMap<u32, String>,
@@ -111,9 +112,9 @@ impl WsManager {
 
     pub(crate) async fn new(url: String, reconnect: bool) -> Result<WsManager> {
         let stop_flag = Arc::new(AtomicBool::new(false));
-
-        let (writer, mut reader) = Self::connect(&url).await?.split();
-        let writer = Arc::new(Mutex::new(writer));
+        let writer: Arc<
+            Mutex<Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, protocol::Message>>>,
+        > = Arc::new(Mutex::new(None));
 
         let subscriptions_map: HashMap<String, Vec<SubscriptionData>> = HashMap::new();
         let subscriptions = Arc::new(Mutex::new(subscriptions_map));
@@ -124,32 +125,18 @@ impl WsManager {
             let stop_flag = Arc::clone(&stop_flag);
             let reader_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
-                    if let Some(data) = reader.next().await {
-                        if let Err(err) =
-                            WsManager::parse_and_send_data(data, &subscriptions_copy).await
-                        {
-                            error!("Error processing data received by WsManager reader: {err}");
-                        }
-                    } else {
-                        warn!("WsManager disconnected");
-                        if let Err(err) = WsManager::send_to_all_subscriptions(
-                            &subscriptions_copy,
-                            Message::NoData,
-                        )
-                        .await
-                        {
-                            warn!("Error sending disconnection notification err={err}");
-                        }
-                        if reconnect {
-                            // Always sleep for 1 second before attempting to reconnect so it does not spin during reconnecting. This could be enhanced with exponential backoff.
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            info!("WsManager attempting to reconnect");
-                            match Self::connect(&url).await {
-                                Ok(ws) => {
-                                    let (new_writer, new_reader) = ws.split();
-                                    reader = new_reader;
-                                    let mut writer_guard = writer.lock().await;
-                                    *writer_guard = new_writer;
+                    info!("WsManager attempting to reconnect");
+                    match Self::connect(&url).await {
+                        Ok(ws) => {
+                            let (new_writer, mut reader) = ws.split();
+                            {
+                                let mut w = writer.lock().await;
+                                *w = Some(new_writer);
+                            }
+                            // resubscribe
+                            {
+                                let mut w = writer.lock().await;
+                                if let Some(mut writer_guard) = w.as_mut() {
                                     for (identifier, v) in subscriptions_copy.lock().await.iter() {
                                         // TODO should these special keys be removed and instead use the simpler direct identifier mapping?
                                         if identifier.eq("userEvents")
@@ -171,18 +158,40 @@ impl WsManager {
                                             Self::subscribe(writer_guard.deref_mut(), identifier)
                                                 .await
                                         {
-                                            error!("Could not resubscribe correctly {identifier}: {err}");
+                                            error!(
+                                            "Could not resubscribe correctly {identifier}: {err}"
+                                        );
                                         }
                                     }
-                                    info!("WsManager reconnect finished");
                                 }
-                                Err(err) => error!("Could not connect to websocket {err}"),
                             }
-                        } else {
-                            error!("WsManager reconnection disabled. Will not reconnect and exiting reader task.");
-                            break;
+                            while let Some(msg) = reader.next().await {
+                                if let Err(err) =
+                                    Self::parse_and_send_data(msg, &subscriptions_copy).await
+                                {
+                                    error!(
+                                        "Error processing data received by WsManager reader: {err}"
+                                    );
+                                    break;
+                                }
+                            }
+                            warn!("Websocket disconnected");
+                            if let Err(err) = WsManager::send_to_all_subscriptions(
+                                &subscriptions_copy,
+                                Message::NoData,
+                            )
+                            .await
+                            {
+                                warn!("Error sending disconnection notification err={err}");
+                            }
                         }
+                        Err(err) => error!("Could not connect to websocket {err}"),
                     }
+
+                    if !reconnect {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 warn!("ws message reader task stopped");
             };
@@ -192,13 +201,20 @@ impl WsManager {
         {
             let stop_flag = Arc::clone(&stop_flag);
             let writer = Arc::clone(&writer);
+
             let ping_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match serde_json::to_string(&Ping { method: "ping" }) {
                         Ok(payload) => {
-                            let mut writer = writer.lock().await;
-                            if let Err(err) = writer.send(protocol::Message::Text(payload)).await {
-                                error!("Error pinging server: {err}")
+                            let mut w = writer.lock().await;
+                            if let Some(writer) = w.as_mut() {
+                                if let Err(err) =
+                                    writer.send(protocol::Message::Text(payload)).await
+                                {
+                                    error!(
+                                        "Error processing data received by WsManager reader: {err}"
+                                    );
+                                }
                             }
                         }
                         Err(err) => error!("Error serializing ping message: {err}"),
@@ -218,6 +234,116 @@ impl WsManager {
             subscription_identifiers: HashMap::new(),
         })
     }
+
+    // pub(crate) async fn _new(url: String, reconnect: bool) -> Result<WsManager> {
+    //     let stop_flag = Arc::new(AtomicBool::new(false));
+
+    //     let (writer, mut reader) = Self::connect(&url).await?.split();
+    //     let writer = Arc::new(Mutex::new(writer));
+
+    //     let subscriptions_map: HashMap<String, Vec<SubscriptionData>> = HashMap::new();
+    //     let subscriptions = Arc::new(Mutex::new(subscriptions_map));
+    //     let subscriptions_copy = Arc::clone(&subscriptions);
+
+    //     {
+    //         let writer = writer.clone();
+    //         let stop_flag = Arc::clone(&stop_flag);
+    //         let reader_fut = async move {
+    //             while !stop_flag.load(Ordering::Relaxed) {
+    //                 if let Some(data) = reader.next().await {
+    //                     if let Err(err) =
+    //                         WsManager::parse_and_send_data(data, &subscriptions_copy).await
+    //                     {
+    //                         error!("Error processing data received by WsManager reader: {err}");
+    //                     }
+    //                 } else {
+    //                     warn!("WsManager disconnected");
+    //                     if let Err(err) = WsManager::send_to_all_subscriptions(
+    //                         &subscriptions_copy,
+    //                         Message::NoData,
+    //                     )
+    //                     .await
+    //                     {
+    //                         warn!("Error sending disconnection notification err={err}");
+    //                     }
+    //                     if reconnect {
+    //                         // Always sleep for 1 second before attempting to reconnect so it does not spin during reconnecting. This could be enhanced with exponential backoff.
+    //                         tokio::time::sleep(Duration::from_secs(1)).await;
+    //                         info!("WsManager attempting to reconnect");
+    //                         match Self::connect(&url).await {
+    //                             Ok(ws) => {
+    //                                 let (new_writer, new_reader) = ws.split();
+    //                                 reader = new_reader;
+    //                                 let mut writer_guard = writer.lock().await;
+    //                                 *writer_guard = new_writer;
+    //                                 for (identifier, v) in subscriptions_copy.lock().await.iter() {
+    //                                     // TODO should these special keys be removed and instead use the simpler direct identifier mapping?
+    //                                     if identifier.eq("userEvents")
+    //                                         || identifier.eq("orderUpdates")
+    //                                     {
+    //                                         for subscription_data in v {
+    //                                             if let Err(err) = Self::subscribe(
+    //                                                 writer_guard.deref_mut(),
+    //                                                 &subscription_data.id,
+    //                                             )
+    //                                             .await
+    //                                             {
+    //                                                 error!(
+    //                                                     "Could not resubscribe {identifier}: {err}"
+    //                                                 );
+    //                                             }
+    //                                         }
+    //                                     } else if let Err(err) =
+    //                                         Self::subscribe(writer_guard.deref_mut(), identifier)
+    //                                             .await
+    //                                     {
+    //                                         error!("Could not resubscribe correctly {identifier}: {err}");
+    //                                     }
+    //                                 }
+    //                                 info!("WsManager reconnect finished");
+    //                             }
+    //                             Err(err) => error!("Could not connect to websocket {err}"),
+    //                         }
+    //                     } else {
+    //                         error!("WsManager reconnection disabled. Will not reconnect and exiting reader task.");
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+    //             warn!("ws message reader task stopped");
+    //         };
+    //         spawn(reader_fut);
+    //     }
+
+    //     {
+    //         let stop_flag = Arc::clone(&stop_flag);
+    //         let writer = Arc::clone(&writer);
+    //         let ping_fut = async move {
+    //             while !stop_flag.load(Ordering::Relaxed) {
+    //                 match serde_json::to_string(&Ping { method: "ping" }) {
+    //                     Ok(payload) => {
+    //                         let mut writer = writer.lock().await;
+    //                         if let Err(err) = writer.send(protocol::Message::Text(payload)).await {
+    //                             error!("Error pinging server: {err}")
+    //                         }
+    //                     }
+    //                     Err(err) => error!("Error serializing ping message: {err}"),
+    //                 }
+    //                 time::sleep(Duration::from_secs(Self::SEND_PING_INTERVAL)).await;
+    //             }
+    //             warn!("ws ping task stopped");
+    //         };
+    //         spawn(ping_fut);
+    //     }
+
+    //     Ok(WsManager {
+    //         stop_flag,
+    //         writer,
+    //         subscriptions,
+    //         subscription_id: 0,
+    //         subscription_identifiers: HashMap::new(),
+    //     })
+    // }
 
     async fn connect(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         Ok(connect_async(url)
@@ -433,7 +559,10 @@ impl WsManager {
         }
 
         if subscriptions.is_empty() {
-            Self::subscribe(self.writer.lock().await.borrow_mut(), identifier.as_str()).await?;
+            let mut w = self.writer.lock().await;
+            if let Some(writer) = w.as_mut() {
+                Self::subscribe(writer, identifier.as_str()).await?;
+            }
         }
 
         let subscription_id = self.subscription_id;
@@ -484,7 +613,10 @@ impl WsManager {
         subscriptions.remove(index);
 
         if subscriptions.is_empty() {
-            Self::unsubscribe(self.writer.lock().await.borrow_mut(), identifier.as_str()).await?;
+            let mut w = self.writer.lock().await;
+            if let Some(writer) = w.as_mut() {
+                Self::unsubscribe(writer, identifier.as_str()).await?;
+            }
         }
         Ok(())
     }
