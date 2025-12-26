@@ -419,7 +419,6 @@ impl WsManager {
                 .map_err(|e| Error::JsonParse(e.to_string()))?,
         })
         .map_err(|e| Error::JsonParse(e.to_string()))?;
-        println!("ws post payload: {}", payload);
         self.writer
             .lock()
             .await

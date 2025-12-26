@@ -215,7 +215,7 @@ impl ExchangeClient {
             vault_address: self.vault_address,
         };
         let request = WsRequestPayload {
-            r#type: "exchange_request".to_string(),
+            r#type: "action".to_string(),
             payload: exchange_payload,
         };
         let res = serde_json::to_string(&request).map_err(|e| Error::JsonParse(e.to_string()))?;
