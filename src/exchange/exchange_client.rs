@@ -27,12 +27,14 @@ use crate::{
     req::HttpClient,
     signature::{sign_l1_action, sign_typed_data},
     BaseUrl, BulkCancelCloid, ClassTransfer, Error, ExchangeResponseStatus, SpotSend, SpotUser,
-    VaultTransfer, Withdraw3,
+    VaultTransfer, Withdraw3, WsManager,
 };
 
 #[derive(Debug)]
 pub struct ExchangeClient {
     pub http_client: HttpClient,
+    pub(crate) ws_manager: Option<WsManager>,
+    reconnect: bool,
     pub wallet: PrivateKeySigner,
     pub meta: Meta,
     pub vault_address: Option<Address>,
@@ -58,6 +60,13 @@ struct ExchangePayload {
     signature: Signature,
     nonce: u64,
     vault_address: Option<Address>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WsRequestPayload {
+    r#type: String,
+    payload: ExchangePayload,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -126,19 +135,102 @@ impl ExchangeClient {
             .spot_meta()
             .await?
             .add_pair_and_name_to_index_map(coin_to_asset);
+        let http_client = HttpClient {
+            client,
+            base_url: base_url.get_url(),
+        };
 
         Ok(ExchangeClient {
             wallet,
             meta,
             vault_address,
-            http_client: HttpClient {
-                client,
-                base_url: base_url.get_url(),
-            },
+            http_client,
             coin_to_asset,
+            reconnect: false,
+            ws_manager: None,
         })
     }
 
+    pub async fn new_with_ws(
+        client: Option<Client>,
+        wallet: PrivateKeySigner,
+        base_url: Option<BaseUrl>,
+        meta: Option<Meta>,
+        vault_address: Option<Address>,
+        reconnect: bool,
+    ) -> Result<ExchangeClient> {
+        let client = client.unwrap_or_default();
+        let base_url = base_url.unwrap_or(BaseUrl::Mainnet);
+
+        let info = InfoClient::new(None, Some(base_url)).await?;
+        let meta = if let Some(meta) = meta {
+            meta
+        } else {
+            info.meta().await?
+        };
+
+        let mut coin_to_asset = HashMap::new();
+        for (asset_ind, asset) in meta.universe.iter().enumerate() {
+            coin_to_asset.insert(asset.name.clone(), asset_ind as u32);
+        }
+
+        coin_to_asset = info
+            .spot_meta()
+            .await?
+            .add_pair_and_name_to_index_map(coin_to_asset);
+        let http_client = HttpClient {
+            client,
+            base_url: base_url.get_url(),
+        };
+
+        let ws_manager =
+            Some(WsManager::new(format!("ws{}/ws", &http_client.base_url[4..]), reconnect).await?);
+
+        Ok(ExchangeClient {
+            wallet,
+            meta,
+            vault_address,
+            http_client,
+            coin_to_asset,
+            reconnect,
+            ws_manager,
+        })
+    }
+    async fn post_via_ws(
+        &mut self,
+        action: serde_json::Value,
+        signature: Signature,
+        nonce: u64,
+    ) -> Result<()> {
+        // let signature = ExchangeSignature {
+        //     r: signature.r(),
+        //     s: signature.s(),
+        //     v: 27 + signature.v() as u64,
+        // };
+
+        let exchange_payload = ExchangePayload {
+            action,
+            signature,
+            nonce,
+            vault_address: self.vault_address,
+        };
+        let request = WsRequestPayload {
+            r#type: "exchange_request".to_string(),
+            payload: exchange_payload,
+        };
+        let res = serde_json::to_string(&request).map_err(|e| Error::JsonParse(e.to_string()))?;
+        debug!("Sending request {res:?}");
+
+        let _ = self
+            .ws_manager
+            .as_mut()
+            .ok_or(Error::WsManagerNotFound)?
+            .send_post(nonce, res)
+            .await
+            .map_err(|e| Error::JsonParse(e.to_string()))?;
+
+        Ok(())
+    }
     async fn post(
         &self,
         action: serde_json::Value,
@@ -469,6 +561,13 @@ impl ExchangeClient {
     ) -> Result<ExchangeResponseStatus> {
         self.bulk_order(vec![order], wallet).await
     }
+    pub async fn ws_order(
+        &mut self,
+        order: ClientOrderRequest,
+        wallet: Option<&PrivateKeySigner>,
+    ) -> Result<()> {
+        self.ws_bulk_order(vec![order], wallet).await
+    }
 
     pub async fn order_with_builder(
         &self,
@@ -478,6 +577,33 @@ impl ExchangeClient {
     ) -> Result<ExchangeResponseStatus> {
         self.bulk_order_with_builder(vec![order], wallet, builder)
             .await
+    }
+
+    pub async fn ws_bulk_order(
+        &mut self,
+        orders: Vec<ClientOrderRequest>,
+        wallet: Option<&PrivateKeySigner>,
+    ) -> Result<()> {
+        let wallet = wallet.unwrap_or(&self.wallet);
+        let timestamp = next_nonce();
+
+        let mut transformed_orders = Vec::new();
+
+        for order in orders {
+            transformed_orders.push(order.convert(&self.coin_to_asset)?);
+        }
+
+        let action = Actions::Order(BulkOrder {
+            orders: transformed_orders,
+            grouping: "na".to_string(),
+            builder: None,
+        });
+        let connection_id = action.hash(timestamp, self.vault_address)?;
+        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
+
+        let is_mainnet = self.http_client.is_mainnet();
+        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
+        self.post_via_ws(action, signature, timestamp).await
     }
 
     pub async fn bulk_order(
