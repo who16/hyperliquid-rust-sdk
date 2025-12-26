@@ -351,3 +351,45 @@ pub struct BboData {
     pub time: u64,
     pub bbo: Vec<Option<BookLevel>>,
 }
+
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct PostData {
+    pub id: u64,
+    pub response: Response,
+}
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "lowercase")]
+pub enum Response {
+    Action { payload: ActionPayload },
+    // Có thể thêm các type khác
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ActionPayload {
+    pub status: String,
+    pub response: OrderResponse,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+#[serde(rename_all = "lowercase")]
+pub enum OrderResponse {
+    Order { data: OrderData },
+    // Có thể thêm các type khác
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OrderData {
+    pub statuses: Vec<OrderStatus>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderStatus {
+    Resting { oid: u64 },
+    Filled { oid: u64 },
+    Cancelled { oid: u64 },
+}
+

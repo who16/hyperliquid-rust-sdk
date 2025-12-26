@@ -102,13 +102,6 @@ pub(crate) struct SubscriptionSendData<'a> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct PostRequest<'a> {
-    method: &'static str,
-    id: u64,
-    request: &'a serde_json::Value,
-}
-
-#[derive(Serialize)]
 pub(crate) struct Ping {
     method: &'static str,
 }
@@ -409,24 +402,6 @@ impl WsManager {
         identifier: &str,
     ) -> Result<()> {
         Self::send_subscription_data("unsubscribe", writer, identifier).await
-    }
-
-    pub(crate) async fn send_post(&mut self, id: u64, data: String) -> Result<()> {
-        let payload = serde_json::to_string(&PostRequest {
-            method: "post",
-            id,
-            request: &serde_json::from_str::<serde_json::Value>(&data)
-                .map_err(|e| Error::JsonParse(e.to_string()))?,
-        })
-        .map_err(|e| Error::JsonParse(e.to_string()))?;
-        self.writer
-            .lock()
-            .await
-            .borrow_mut()
-            .send(protocol::Message::Text(payload))
-            .await
-            .map_err(|e| Error::Websocket(e.to_string()))?;
-        Ok(())
     }
 
     pub(crate) async fn add_subscription(

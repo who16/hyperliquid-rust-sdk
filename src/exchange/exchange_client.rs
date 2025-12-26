@@ -26,15 +26,14 @@ use crate::{
     prelude::*,
     req::HttpClient,
     signature::{sign_l1_action, sign_typed_data},
-    BaseUrl, BulkCancelCloid, ClassTransfer, Error, ExchangeResponseStatus, SpotSend, SpotUser,
-    VaultTransfer, Withdraw3, WsManager,
+    BaseUrl, BulkCancelCloid, ClassTransfer, Error, ExchangeResponseStatus, PostWsManager,
+    ReponseMessageSender, SpotSend, SpotUser, VaultTransfer, Withdraw3,
 };
 
 #[derive(Debug)]
 pub struct ExchangeClient {
     pub http_client: HttpClient,
-    pub(crate) ws_manager: Option<WsManager>,
-    reconnect: bool,
+    pub(crate) ws_manager: Option<PostWsManager>,
     pub wallet: PrivateKeySigner,
     pub meta: Meta,
     pub vault_address: Option<Address>,
@@ -146,7 +145,6 @@ impl ExchangeClient {
             vault_address,
             http_client,
             coin_to_asset,
-            reconnect: false,
             ws_manager: None,
         })
     }
@@ -158,6 +156,7 @@ impl ExchangeClient {
         meta: Option<Meta>,
         vault_address: Option<Address>,
         reconnect: bool,
+        response_channel: Option<ReponseMessageSender>,
     ) -> Result<ExchangeClient> {
         let client = client.unwrap_or_default();
         let base_url = base_url.unwrap_or(BaseUrl::Mainnet);
@@ -183,8 +182,14 @@ impl ExchangeClient {
             base_url: base_url.get_url(),
         };
 
-        let ws_manager =
-            Some(WsManager::new(format!("ws{}/ws", &http_client.base_url[4..]), reconnect).await?);
+        let ws_manager = Some(
+            PostWsManager::new(
+                format!("ws{}/ws", &http_client.base_url[4..]),
+                reconnect,
+                response_channel,
+            )
+            .await?,
+        );
 
         Ok(ExchangeClient {
             wallet,
@@ -192,7 +197,6 @@ impl ExchangeClient {
             vault_address,
             http_client,
             coin_to_asset,
-            reconnect,
             ws_manager,
         })
     }
@@ -221,11 +225,10 @@ impl ExchangeClient {
         let res = serde_json::to_string(&request).map_err(|e| Error::JsonParse(e.to_string()))?;
         debug!("Sending request {res:?}");
 
-        let _ = self
-            .ws_manager
+        self.ws_manager
             .as_mut()
             .ok_or(Error::WsManagerNotFound)?
-            .send_post(nonce, res)
+            .send(nonce, res)
             .await
             .map_err(|e| Error::JsonParse(e.to_string()))?;
 
