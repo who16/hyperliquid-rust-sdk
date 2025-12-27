@@ -352,7 +352,6 @@ pub struct BboData {
     pub bbo: Vec<Option<BookLevel>>,
 }
 
-
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct PostData {
     pub id: u64,
@@ -377,7 +376,7 @@ pub struct ActionPayload {
 #[serde(rename_all = "lowercase")]
 pub enum OrderResponse {
     Order { data: OrderData },
-    // Có thể thêm các type khác
+    Cancel { data: OrderData }, // Có thể thêm các type khác
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -392,4 +391,3 @@ pub enum OrderStatus {
     Filled { oid: u64 },
     Cancelled { oid: u64 },
 }
-
