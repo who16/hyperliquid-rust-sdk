@@ -66,6 +66,7 @@ impl PostWsManager {
         let writer = Arc::new(Mutex::new(writer));
 
         {
+            let writer = writer.clone();
             let stop_flag = Arc::clone(&stop_flag);
             let reader_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
@@ -82,8 +83,10 @@ impl PostWsManager {
                             info!("WsManager attempting to reconnect");
                             match Self::connect(&url).await {
                                 Ok(ws) => {
-                                    let (_, new_reader) = ws.split();
+                                    let (new_writer, new_reader) = ws.split();
                                     reader = new_reader;
+                                    let mut writer_guard = writer.lock().await;
+                                    *writer_guard = new_writer;
                                     info!("WsManager reconnect finished");
                                 }
                                 Err(err) => error!("Could not connect to websocket {err}"),
