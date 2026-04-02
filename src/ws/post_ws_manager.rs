@@ -1,5 +1,4 @@
 use std::{
-    borrow::BorrowMut,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -47,13 +46,9 @@ pub(crate) struct PostWsManager {
     writer: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, protocol::Message>>>,
 }
 
-#[derive(Serialize)]
-pub(crate) struct Ping {
-    method: &'static str,
-}
-
 impl PostWsManager {
     const SEND_PING_INTERVAL: u64 = 50;
+    const PING_PAYLOAD: &'static str = r#"{"method":"ping"}"#;
 
     pub(crate) async fn new(
         url: String,
@@ -76,25 +71,23 @@ impl PostWsManager {
                                 error!("Error processing data received by WsManager reader: {err}");
                             }
                         }
-                    } else {
-                        if reconnect {
-                            // Always sleep for 1 second before attempting to reconnect so it does not spin during reconnecting. This could be enhanced with exponential backoff.
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            info!("WsManager attempting to reconnect");
-                            match Self::connect(&url).await {
-                                Ok(ws) => {
-                                    let (new_writer, new_reader) = ws.split();
-                                    reader = new_reader;
-                                    let mut writer_guard = writer.lock().await;
-                                    *writer_guard = new_writer;
-                                    info!("WsManager reconnect finished");
-                                }
-                                Err(err) => error!("Could not connect to websocket {err}"),
+                    } else if reconnect {
+                        // Always sleep for 1 second before attempting to reconnect so it does not spin during reconnecting. This could be enhanced with exponential backoff.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        info!("WsManager attempting to reconnect");
+                        match Self::connect(&url).await {
+                            Ok(ws) => {
+                                let (new_writer, new_reader) = ws.split();
+                                reader = new_reader;
+                                let mut writer_guard = writer.lock().await;
+                                *writer_guard = new_writer;
+                                info!("WsManager reconnect finished");
                             }
-                        } else {
-                            error!("WsManager reconnection disabled. Will not reconnect and exiting reader task.");
-                            break;
+                            Err(err) => error!("Could not connect to websocket {err}"),
                         }
+                    } else {
+                        error!("WsManager reconnection disabled. Will not reconnect and exiting reader task.");
+                        break;
                     }
                 }
                 warn!("ws message reader task stopped");
@@ -107,15 +100,14 @@ impl PostWsManager {
             let writer = Arc::clone(&writer);
             let ping_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
-                    match serde_json::to_string(&Ping { method: "ping" }) {
-                        Ok(payload) => {
-                            let mut writer = writer.lock().await;
-                            if let Err(err) = writer.send(protocol::Message::Text(payload)).await {
-                                error!("Error pinging server: {err}")
-                            }
-                        }
-                        Err(err) => error!("Error serializing ping message: {err}"),
+                    let mut writer = writer.lock().await;
+                    if let Err(err) = writer
+                        .send(protocol::Message::Text(Self::PING_PAYLOAD.to_string()))
+                        .await
+                    {
+                        error!("Error pinging server: {err}")
                     }
+                    drop(writer);
                     time::sleep(Duration::from_secs(Self::SEND_PING_INTERVAL)).await;
                 }
                 warn!("ws ping task stopped");
@@ -170,18 +162,16 @@ impl PostWsManager {
         }
     }
 
-    pub(crate) async fn send(&mut self, id: u64, data: String) -> Result<()> {
+    pub(crate) async fn send(&self, id: u64, request: &serde_json::Value) -> Result<()> {
         let payload = serde_json::to_string(&PostRequest {
             method: "post",
             id,
-            request: &serde_json::from_str::<serde_json::Value>(&data)
-                .map_err(|e| Error::JsonParse(e.to_string()))?,
+            request,
         })
         .map_err(|e| Error::JsonParse(e.to_string()))?;
         self.writer
             .lock()
             .await
-            .borrow_mut()
             .send(protocol::Message::Text(payload))
             .await
             .map_err(|e| Error::Websocket(e.to_string()))?;

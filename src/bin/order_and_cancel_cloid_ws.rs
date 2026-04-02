@@ -19,7 +19,7 @@ async fn main() {
             .unwrap();
     let (tx, mut rx) = unbounded_channel();
 
-    let mut exchange_client = ExchangeClient::new_with_ws(
+    let exchange_client = ExchangeClient::new_with_ws(
         None,
         wallet,
         Some(BaseUrl::Mainnet),

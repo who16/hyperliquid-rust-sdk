@@ -200,18 +200,25 @@ impl ExchangeClient {
             ws_manager,
         })
     }
+    fn sign_action(
+        &self,
+        action: Actions,
+        wallet: &PrivateKeySigner,
+    ) -> Result<(serde_json::Value, Signature, u64)> {
+        let timestamp = next_nonce();
+        let connection_id = action.hash(timestamp, self.vault_address)?;
+        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
+        let is_mainnet = self.http_client.is_mainnet();
+        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
+        Ok((action, signature, timestamp))
+    }
+
     async fn post_via_ws(
-        &mut self,
+        &self,
         action: serde_json::Value,
         signature: Signature,
         nonce: u64,
     ) -> Result<()> {
-        // let signature = ExchangeSignature {
-        //     r: signature.r(),
-        //     s: signature.s(),
-        //     v: 27 + signature.v() as u64,
-        // };
-
         let exchange_payload = ExchangePayload {
             action,
             signature,
@@ -222,15 +229,15 @@ impl ExchangeClient {
             r#type: "action".to_string(),
             payload: exchange_payload,
         };
-        let res = serde_json::to_string(&request).map_err(|e| Error::JsonParse(e.to_string()))?;
-        debug!("Sending request {res:?}");
+        let request =
+            serde_json::to_value(&request).map_err(|e| Error::JsonParse(e.to_string()))?;
+        debug!("Sending request {request:?}");
 
         self.ws_manager
-            .as_mut()
+            .as_ref()
             .ok_or(Error::WsManagerNotFound)?
-            .send(nonce, res)
-            .await
-            .map_err(|e| Error::JsonParse(e.to_string()))?;
+            .send(nonce, &request)
+            .await?;
 
         Ok(())
     }
@@ -965,34 +972,22 @@ impl ExchangeClient {
 
     // FOR WEB SOCKET
     pub async fn ws_bulk_modify(
-        &mut self,
+        &self,
         modifies: Vec<ClientModifyRequest>,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
-        let timestamp = next_nonce();
-
-        let mut transformed_modifies = Vec::new();
-        for modify in modifies.into_iter() {
-            transformed_modifies.push(ModifyRequest {
-                oid: modify.oid,
-                order: modify.order.convert(&self.coin_to_asset)?,
-            });
-        }
-
-        let action = Actions::BatchModify(BulkModify {
-            modifies: transformed_modifies,
-        });
-        let connection_id = action.hash(timestamp, self.vault_address)?;
-
-        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
-        let is_mainnet = self.http_client.is_mainnet();
-        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
-
-        self.post_via_ws(action, signature, timestamp).await
+        let modifies = modifies
+            .into_iter()
+            .map(|m| Ok(ModifyRequest { oid: m.oid, order: m.order.convert(&self.coin_to_asset)? }))
+            .collect::<Result<Vec<_>>>()?;
+        let action = Actions::BatchModify(BulkModify { modifies });
+        let (action, signature, nonce) = self.sign_action(action, wallet)?;
+        self.post_via_ws(action, signature, nonce).await
     }
+
     pub async fn ws_modify(
-        &mut self,
+        &self,
         modify: ClientModifyRequest,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
@@ -1000,7 +995,7 @@ impl ExchangeClient {
     }
 
     pub async fn ws_cancel_by_cloid(
-        &mut self,
+        &self,
         cancel: ClientCancelRequestCloid,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
@@ -1008,66 +1003,40 @@ impl ExchangeClient {
     }
 
     pub async fn ws_bulk_cancel_by_cloid(
-        &mut self,
+        &self,
         cancels: Vec<ClientCancelRequestCloid>,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
-        let timestamp = next_nonce();
-
-        let mut transformed_cancels: Vec<CancelRequestCloid> = Vec::new();
-        for cancel in cancels.into_iter() {
-            let &asset = self
-                .coin_to_asset
-                .get(&cancel.asset)
-                .ok_or(Error::AssetNotFound)?;
-            transformed_cancels.push(CancelRequestCloid {
-                asset,
-                cloid: uuid_to_hex_string(cancel.cloid),
-            });
-        }
-
-        let action = Actions::CancelByCloid(BulkCancelCloid {
-            cancels: transformed_cancels,
-        });
-
-        let connection_id = action.hash(timestamp, self.vault_address)?;
-        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
-        let is_mainnet = self.http_client.is_mainnet();
-        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
-
-        self.post_via_ws(action, signature, timestamp).await
+        let cancels = cancels
+            .into_iter()
+            .map(|c| {
+                let &asset = self.coin_to_asset.get(&c.asset).ok_or(Error::AssetNotFound)?;
+                Ok(CancelRequestCloid { asset, cloid: uuid_to_hex_string(c.cloid) })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let action = Actions::CancelByCloid(BulkCancelCloid { cancels });
+        let (action, signature, nonce) = self.sign_action(action, wallet)?;
+        self.post_via_ws(action, signature, nonce).await
     }
 
     pub async fn ws_bulk_order(
-        &mut self,
+        &self,
         orders: Vec<ClientOrderRequest>,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
-        let timestamp = next_nonce();
-
-        let mut transformed_orders = Vec::new();
-
-        for order in orders {
-            transformed_orders.push(order.convert(&self.coin_to_asset)?);
-        }
-
-        let action = Actions::Order(BulkOrder {
-            orders: transformed_orders,
-            grouping: "na".to_string(),
-            builder: None,
-        });
-        let connection_id = action.hash(timestamp, self.vault_address)?;
-        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
-
-        let is_mainnet = self.http_client.is_mainnet();
-        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
-        self.post_via_ws(action, signature, timestamp).await
+        let orders = orders
+            .into_iter()
+            .map(|o| o.convert(&self.coin_to_asset))
+            .collect::<Result<Vec<_>>>()?;
+        let action = Actions::Order(BulkOrder { orders, grouping: "na".to_string(), builder: None });
+        let (action, signature, nonce) = self.sign_action(action, wallet)?;
+        self.post_via_ws(action, signature, nonce).await
     }
 
     pub async fn ws_order(
-        &mut self,
+        &self,
         order: ClientOrderRequest,
         wallet: Option<&PrivateKeySigner>,
     ) -> Result<()> {
