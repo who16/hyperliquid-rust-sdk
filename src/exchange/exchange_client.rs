@@ -964,6 +964,40 @@ impl ExchangeClient {
     }
 
     // FOR WEB SOCKET
+    pub async fn ws_bulk_modify(
+        &mut self,
+        modifies: Vec<ClientModifyRequest>,
+        wallet: Option<&PrivateKeySigner>,
+    ) -> Result<()> {
+        let wallet = wallet.unwrap_or(&self.wallet);
+        let timestamp = next_nonce();
+
+        let mut transformed_modifies = Vec::new();
+        for modify in modifies.into_iter() {
+            transformed_modifies.push(ModifyRequest {
+                oid: modify.oid,
+                order: modify.order.convert(&self.coin_to_asset)?,
+            });
+        }
+
+        let action = Actions::BatchModify(BulkModify {
+            modifies: transformed_modifies,
+        });
+        let connection_id = action.hash(timestamp, self.vault_address)?;
+
+        let action = serde_json::to_value(&action).map_err(|e| Error::JsonParse(e.to_string()))?;
+        let is_mainnet = self.http_client.is_mainnet();
+        let signature = sign_l1_action(wallet, connection_id, is_mainnet)?;
+
+        self.post_via_ws(action, signature, timestamp).await
+    }
+    pub async fn ws_modify(
+        &mut self,
+        modify: ClientModifyRequest,
+        wallet: Option<&PrivateKeySigner>,
+    ) -> Result<()> {
+        self.ws_bulk_modify(vec![modify], wallet).await
+    }
 
     pub async fn ws_cancel_by_cloid(
         &mut self,
