@@ -183,6 +183,7 @@ pub enum LedgerUpdate {
     AccountClassTransfer(AccountClassTransfer),
     SpotTransfer(SpotTransfer),
     SpotGenesis(SpotGenesis),
+    Send(SpotTransfer),
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -390,4 +391,6 @@ pub enum OrderStatus {
     Resting { oid: u64 },
     Filled { oid: u64 },
     Cancelled { oid: u64 },
+    Error(String),
+    Success { oid: u64 },
 }
