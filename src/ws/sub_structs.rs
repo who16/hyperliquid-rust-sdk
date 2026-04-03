@@ -184,7 +184,7 @@ pub enum LedgerUpdate {
     SpotTransfer(SpotTransfer),
     SpotGenesis(SpotGenesis),
     Send(SpotTransfer),
-    CStakingTransfer(SpotTransfer),
+    CStakingTransfer(serde_json::Value),
 }
 
 #[derive(Deserialize, Clone, Debug)]
