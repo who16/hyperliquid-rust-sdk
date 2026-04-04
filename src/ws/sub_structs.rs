@@ -357,7 +357,7 @@ pub struct BboData {
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct PostData {
     pub id: u64,
-    pub response: Response,
+    pub response: serde_json::Value,
 }
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
