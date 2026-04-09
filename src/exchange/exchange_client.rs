@@ -696,7 +696,7 @@ impl ExchangeClient {
         let mut transformed_modifies = Vec::new();
         for modify in modifies.into_iter() {
             transformed_modifies.push(ModifyRequest {
-                oid: modify.oid,
+                oid: modify.oid.map_right(uuid_to_hex_string),
                 order: modify.order.convert(&self.coin_to_asset)?,
             });
         }
@@ -977,7 +977,7 @@ impl ExchangeClient {
         let wallet = wallet.unwrap_or(&self.wallet);
         let modifies = modifies
             .into_iter()
-            .map(|m| Ok(ModifyRequest { oid: m.oid, order: m.order.convert(&self.coin_to_asset)? }))
+            .map(|m| Ok(ModifyRequest { oid: m.oid.map_right(uuid_to_hex_string), order: m.order.convert(&self.coin_to_asset)? }))
             .collect::<Result<Vec<_>>>()?;
         let action = Actions::BatchModify(BulkModify { modifies });
         let (action, signature, nonce) = self.sign_action(action, wallet)?;

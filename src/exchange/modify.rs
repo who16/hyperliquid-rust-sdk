@@ -1,9 +1,10 @@
 use either::Either;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::{order::OrderRequest, ClientOrderRequest};
 
-pub type Cloid = String;
+pub type Cloid = Uuid;
 pub type OidOrCloid = Either<u64, Cloid>;
 
 #[derive(Debug)]
@@ -14,6 +15,6 @@ pub struct ClientModifyRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ModifyRequest {
-    pub oid: OidOrCloid,
+    pub oid: Either<u64, String>,
     pub order: OrderRequest,
 }
