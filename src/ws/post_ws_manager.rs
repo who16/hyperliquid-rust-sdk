@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpStream,
     spawn,
-    sync::{mpsc::UnboundedSender, oneshot, Mutex},
+    sync::{mpsc::UnboundedSender, Mutex},
     time,
 };
 use tokio_tungstenite::{
@@ -41,19 +40,16 @@ pub enum PostResponseMessage {
     Pong,
     HyperliquidError(String),
 }
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<PostData>>>>;
 
 #[derive(Debug)]
 pub(crate) struct PostWsManager {
     stop_flag: Arc<AtomicBool>,
     writer: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, protocol::Message>>>,
-    pending: PendingMap,
 }
 
 impl PostWsManager {
     const SEND_PING_INTERVAL: u64 = 50;
     const PING_PAYLOAD: &'static str = r#"{"method":"ping"}"#;
-    const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
     pub(crate) async fn new(
         url: String,
@@ -65,24 +61,18 @@ impl PostWsManager {
         let (writer, mut reader) = Self::connect(&url).await?.split();
         let writer = Arc::new(Mutex::new(writer));
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-
         {
             let writer = writer.clone();
             let stop_flag = Arc::clone(&stop_flag);
-            let pending = Arc::clone(&pending);
             let reader_fut = async move {
                 while !stop_flag.load(Ordering::Relaxed) {
                     if let Some(data) = reader.next().await {
                         if let Err(err) =
-                            PostWsManager::parse_and_send_data(data, &response_channel, &pending)
-                                .await
+                            PostWsManager::parse_and_send_data(data, &response_channel).await
                         {
                             error!("Error processing data received by WsManager reader: {err}");
                         }
                     } else if reconnect {
-                        // Drop all pending responses — they were sent on the old connection
-                        pending.lock().await.clear();
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         info!("WsManager attempting to reconnect");
                         match Self::connect(&url).await {
@@ -125,7 +115,7 @@ impl PostWsManager {
             spawn(ping_fut);
         }
 
-        Ok(PostWsManager { stop_flag, writer, pending })
+        Ok(PostWsManager { stop_flag, writer })
     }
 
     async fn connect(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
@@ -138,7 +128,6 @@ impl PostWsManager {
     async fn parse_and_send_data(
         data: std::result::Result<protocol::Message, tungstenite::Error>,
         response_channel: &Option<ReponseMessageSender>,
-        pending: &PendingMap,
     ) -> Result<()> {
         match data {
             Ok(data) => match data.into_text() {
@@ -148,12 +137,6 @@ impl PostWsManager {
                     }
                     let message = serde_json::from_str::<PostResponseMessage>(&data)
                         .map_err(|e| Error::JsonParse(e.to_string()))?;
-
-                    if let PostResponseMessage::Post { ref data } = message {
-                        if let Some(tx) = pending.lock().await.remove(&data.id) {
-                            let _ = tx.send(data.clone());
-                        }
-                    }
 
                     if let Some(rc) = response_channel {
                         rc.send(message)
@@ -181,39 +164,19 @@ impl PostWsManager {
         }
     }
 
-    pub(crate) async fn send(&self, id: u64, request: &serde_json::Value) -> Result<PostData> {
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
+    pub(crate) async fn send(&self, id: u64, request: &serde_json::Value) -> Result<()> {
         let payload = serde_json::to_string(&PostRequest {
             method: "post",
             id,
             request,
         })
         .map_err(|e| Error::JsonParse(e.to_string()))?;
-
-        if let Err(e) = self
-            .writer
+        self.writer
             .lock()
             .await
             .send(protocol::Message::Text(payload))
             .await
-        {
-            self.pending.lock().await.remove(&id);
-            return Err(Error::Websocket(e.to_string()));
-        }
-
-        match tokio::time::timeout(Self::RESPONSE_TIMEOUT, rx).await {
-            Ok(Ok(data)) => Ok(data),
-            Ok(Err(_)) => {
-                // oneshot sender dropped (connection lost)
-                Err(Error::WsSend("response channel closed".to_string()))
-            }
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(Error::WsSend("response timeout".to_string()))
-            }
-        }
+            .map_err(|e| Error::Websocket(e.to_string()))
     }
 }
 
