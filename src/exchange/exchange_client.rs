@@ -26,7 +26,7 @@ use crate::{
     prelude::*,
     req::HttpClient,
     signature::{sign_l1_action, sign_typed_data},
-    BaseUrl, BulkCancelCloid, ClassTransfer, Error, ExchangeResponseStatus, PostData, PostWsManager,
+    BaseUrl, BulkCancelCloid, ClassTransfer, Error, ExchangeResponseStatus, PostWsManager,
     ReponseMessageSender, SpotSend, SpotUser, VaultTransfer, Withdraw3,
 };
 
@@ -218,7 +218,7 @@ impl ExchangeClient {
         action: serde_json::Value,
         signature: Signature,
         nonce: u64,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         let exchange_payload = ExchangePayload {
             action,
             signature,
@@ -973,7 +973,7 @@ impl ExchangeClient {
         &self,
         modifies: Vec<ClientModifyRequest>,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
         let modifies = modifies
             .into_iter()
@@ -988,7 +988,7 @@ impl ExchangeClient {
         &self,
         modify: ClientModifyRequest,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         self.ws_bulk_modify(vec![modify], wallet).await
     }
 
@@ -996,7 +996,7 @@ impl ExchangeClient {
         &self,
         cancel: ClientCancelRequestCloid,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         self.ws_bulk_cancel_by_cloid(vec![cancel], wallet).await
     }
 
@@ -1004,7 +1004,7 @@ impl ExchangeClient {
         &self,
         cancels: Vec<ClientCancelRequestCloid>,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
         let cancels = cancels
             .into_iter()
@@ -1022,7 +1022,7 @@ impl ExchangeClient {
         &self,
         orders: Vec<ClientOrderRequest>,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         let wallet = wallet.unwrap_or(&self.wallet);
         let orders = orders
             .into_iter()
@@ -1037,7 +1037,7 @@ impl ExchangeClient {
         &self,
         order: ClientOrderRequest,
         wallet: Option<&PrivateKeySigner>,
-    ) -> Result<PostData> {
+    ) -> Result<()> {
         self.ws_bulk_order(vec![order], wallet).await
     }
 }
